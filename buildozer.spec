@@ -6,7 +6,7 @@ source.include_exts = py,kv,txt,md
 version = 1.1.0
 
 requirements = python3,kivy,numpy,android,pyjnius
-orientation = all
+orientation = landscape
 fullscreen = 1
 
 android.permissions = RECORD_AUDIO, MODIFY_AUDIO_SETTINGS, WAKE_LOCK
