@@ -20,7 +20,6 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      # KEIN absoluter Root-Pfad mehr!
       GRADLE_OPTS: -Xmx4g -Dorg.gradle.daemon=false
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_NO_PYTHON_VERSION_WARNING: "1"
@@ -49,7 +48,7 @@ jobs:
             python3-venv python3-pip \
             libffi-dev libssl-dev libbz2-dev libsqlite3-dev zlib1g-dev \
             libncurses5-dev libncursesw5-dev libreadline-dev libgdbm-dev liblzma-dev \
-            autoconf automake libtool pkg-config cmake
+            autoconf automake libtool pkg-config cmake curl
 
       - name: Restore caches
         uses: actions/cache@v4
@@ -70,45 +69,69 @@ jobs:
           python -m pip install --upgrade pip
           pip install "cython>=3.0" buildozer
 
-      # Nutzt einen beschreibbaren Standardpfad des Actions-Images
-      - name: Install Android cmdline-tools + set env
+      # Installiert SDK in /usr/local/lib/android/sdk (beschreibbar) und setzt ANDROID_* Variablen
+      - name: Install Android SDK skeleton
         uses: android-actions/setup-android@v3
         with:
-          # nur das Nötige, Rest installieren wir explizit
           packages: |
             platform-tools
-        env:
-          # WICHTIG: KEIN /android-sdk verwenden!
-          # setup-android setzt ANDROID_SDK_ROOT automatisch auf /usr/local/lib/android/sdk
-          # Wir spiegeln ANDROID_HOME darauf, damit p4a/Buildozer es finden.
-          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
 
-      - name: Accept licenses & pin API/Build-Tools (34.0.0)
+      # Robust: sdkmanager finden/ggf. cmdline-tools nachinstallieren, Lizenzen akzeptieren, API/Build-Tools 34 pinnen.
+      - name: Prepare Android SDK (licenses + API/BT pins)
         shell: bash
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
         run: |
-          # Pfad-Absicherung
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls -la "$ANDROID_SDK_ROOT" || true
+          set -euo pipefail
 
-          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
+          echo "ANDROID_HOME=${ANDROID_HOME}"
+          mkdir -p "${ANDROID_SDK_ROOT}"
 
-          # Eventuelle 36.x Reste aggressiv entfernen
-          rm -rf "$HOME/.buildozer/android/platform/android-sdk/build-tools/36."* || true
-          rm -rf "$ANDROID_SDK_ROOT/build-tools/36."* || true
+          # 1) sdkmanager ermitteln oder cmdline-tools 'latest' nachinstallieren
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "${SDKMANAGER}" ]; then
+            if [ -x "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" ]; then
+              SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+            else
+              echo "Installing cmdline-tools (latest)…"
+              mkdir -p "${ANDROID_SDK_ROOT}/cmdline-tools"
+              curl -L -o /tmp/cmdtools.zip "https://dl.google.com/android/repository/commandlinetools-linux-12266719_latest.zip"
+              unzip -q /tmp/cmdtools.zip -d "${ANDROID_SDK_ROOT}/cmdline-tools"
+              # entpackt als 'cmdline-tools'; nach 'latest' verschieben (von Google so empfohlen)
+              mv "${ANDROID_SDK_ROOT}/cmdline-tools/cmdline-tools" "${ANDROID_SDK_ROOT}/cmdline-tools/latest"
+              SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+              chmod +x "${SDKMANAGER}"
+            fi
+          fi
+          echo "Using sdkmanager at: ${SDKMANAGER}"
+
+          yes | "${SDKMANAGER}" --licenses
+
+          "${SDKMANAGER}" --install "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+
+          # 2) Falls 36.x Build-Tools irgendwie reingekommen sind → entfernen
+          rm -rf "${ANDROID_SDK_ROOT}/build-tools/36."* || true
+          rm -rf "${HOME}/.buildozer/android/platform/android-sdk/build-tools/36."* || true
+
+          echo "Installed build-tools:"
+          ls -1 "${ANDROID_SDK_ROOT}/build-tools" || true
+          echo "Installed platforms:"
+          ls -1 "${ANDROID_SDK_ROOT}/platforms" || true
 
       - name: Build debug APK
         shell: bash
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
         run: |
           source .venv/bin/activate
           set -o pipefail
-          # explizit beide Variablen setzen, damit p4a/Buildozer sicher den SDK findet
-          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT}"
-          export ANDROID_HOME="${ANDROID_SDK_ROOT}"
+          # Buildozer findet das SDK über ANDROID_SDK_ROOT/ANDROID_HOME
           buildozer -v android debug 2>&1 | tee buildozer.log
 
-      - name: Show produced files (diagnostics)
+      - name: Diagnostics (list outputs)
         if: always()
         run: |
           echo "== tree bin (if exists) =="
