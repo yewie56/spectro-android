@@ -1,0 +1,58 @@
+name: Android APK (Buildozer Debug)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-debug:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential git zip unzip \
+            openjdk-17-jdk python3-venv python3-pip \
+            libffi-dev libssl-dev libbz2-dev libsqlite3-dev zlib1g-dev \
+            libncurses5-dev libncursesw5-dev libreadline-dev libgdbm-dev liblzma-dev \
+            autoconf automake libtool pkg-config cmake
+
+      - name: Cache Buildozer/Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            .buildozer
+            ~/.buildozer
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-buildozer-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            ${{ runner.os }}-buildozer-
+
+      - name: Create venv and install Buildozer
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip cython buildozer
+
+      - name: Build debug APK
+        run: |
+          source .venv/bin/activate
+          buildozer android debug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-debug
+          path: bin/*.apk
