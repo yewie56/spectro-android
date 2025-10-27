@@ -18,16 +18,13 @@ concurrency:
 jobs:
   android-debug:
     runs-on: ubuntu-24.04
-
     env:
-      # Buildozer legt SDK/NDK standardmäßig unter ~/.buildozer ab
       ANDROID_HOME: ${{ github.runner.temp }}/android-sdk
       ANDROID_SDK_ROOT: ${{ github.runner.temp }}/android-sdk
-      # etwas mehr Heap für Gradle in CI
-      GRADLE_OPTS: -Xmx4g
-      # schnelleres pip
+      GRADLE_OPTS: -Xmx4g -Dorg.gradle.daemon=false
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_NO_PYTHON_VERSION_WARNING: "1"
+      BUILDOZER_WARN_ON_ROOT: "0"
 
     steps:
       - name: Checkout
@@ -38,13 +35,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Set up Java (Temurin 17)
+      - name: Set up Java 17 (Temurin)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Install system dependencies
+      - name: Install system packages
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -54,7 +51,6 @@ jobs:
             libncurses5-dev libncursesw5-dev libreadline-dev libgdbm-dev liblzma-dev \
             autoconf automake libtool pkg-config cmake
 
-      # Caches für Buildozer/Gradle (beschleunigt Folge-Builds deutlich)
       - name: Restore caches
         uses: actions/cache@v4
         with:
@@ -67,12 +63,12 @@ jobs:
           restore-keys: |
             Linux-buildozer-
 
-      - name: Create venv & install Python tooling
+      - name: Create venv & install tools
         run: |
           python -m venv .venv
           source .venv/bin/activate
           python -m pip install --upgrade pip
-          pip install cython buildozer
+          pip install "cython>=3.0" buildozer
 
       - name: Set up Android SDK (cmdline-tools)
         uses: android-actions/setup-android@v3
@@ -80,37 +76,56 @@ jobs:
           packages: |
             platform-tools
 
-      - name: Accept SDK licenses & install required components (API 34 / build-tools 34.0.0)
+      - name: Accept licenses & pin API/Build-Tools
         shell: bash
         run: |
-          # Sicherheitshalber die offiziellen Pfade setzen
-          echo "ANDROID_HOME=${ANDROID_HOME}"
           mkdir -p "$ANDROID_SDK_ROOT"
           yes | sdkmanager --licenses
-
-          # Gewünschte Versionen installieren
           sdkmanager "platforms;android-34" "build-tools;34.0.0"
-
-          # Falls Runner irgendwo 36.1 eingeschleppt hat -> hart entfernen
+          # Eventuelle 36.x Reste aggressiv entfernen (verhindert AIDL-Fehler)
           rm -rf "$HOME/.buildozer/android/platform/android-sdk/build-tools/36."* || true
           rm -rf "$ANDROID_SDK_ROOT/build-tools/36."* || true
 
-      - name: Build debug APK with Buildozer
+      - name: Build debug APK
         shell: bash
         run: |
           source .venv/bin/activate
-          # Optional: etwas Debug-Ausgabe zur Kontrolle
+          echo "== sdkmanager --list (short) =="
           sdkmanager --list | sed -n '1,120p' || true
 
-          # Buildozer-Log etwas ausführlicher
-          export BUILDOZER_WARN_ON_ROOT=0
-          buildozer -v android debug
+          set -o pipefail
+          # ausführliches Buildozer-Log, wir behalten es als Artefakt
+          buildozer -v android debug 2>&1 | tee buildozer.log
 
-      - name: Upload APK artifact
+      - name: Show produced files (diagnostics)
+        if: always()
+        run: |
+          echo "== tree bin (if exists) =="
+          (ls -la bin && find bin -maxdepth 2 -type f) || echo "no bin dir"
+          echo "== search for APK/AAB under .buildozer =="
+          find .buildozer -type f \( -name "*.apk" -o -name "*.aab" \) -printf "%p\n" || true
+
+      # Artefakte IMMER hochladen: Logs + alle möglichen Output-Pfade
+      - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: spectro-android-debug-apk
+          name: build-logs
           path: |
-            bin/*.apk
-          if-no-files-found: error
+            buildozer.log
+            .buildozer/android/platform/*.txt
+            .buildozer/android/platform/*/gradle-*.log
+          if-no-files-found: warn
+
+      - name: Upload APK/AAB (best-effort, mehrere Pfade)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spectro-android-outputs
+          path: |
+            bin/**/*.apk
+            bin/**/*.aab
+            .buildozer/**/outputs/**/*.apk
+            .buildozer/**/outputs/**/*.aab
+            .buildozer/android/platform/build-*/dists/*/bin/*.apk
+          if-no-files-found: warn
