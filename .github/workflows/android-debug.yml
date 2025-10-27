@@ -18,9 +18,9 @@ concurrency:
 jobs:
   android-debug:
     runs-on: ubuntu-24.04
+
     env:
-      ANDROID_HOME: ${{ github.runner.temp }}/android-sdk
-      ANDROID_SDK_ROOT: ${{ github.runner.temp }}/android-sdk
+      # KEIN absoluter Root-Pfad mehr!
       GRADLE_OPTS: -Xmx4g -Dorg.gradle.daemon=false
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_NO_PYTHON_VERSION_WARNING: "1"
@@ -70,19 +70,31 @@ jobs:
           python -m pip install --upgrade pip
           pip install "cython>=3.0" buildozer
 
-      - name: Set up Android SDK (cmdline-tools)
+      # Nutzt einen beschreibbaren Standardpfad des Actions-Images
+      - name: Install Android cmdline-tools + set env
         uses: android-actions/setup-android@v3
         with:
+          # nur das Nötige, Rest installieren wir explizit
           packages: |
             platform-tools
+        env:
+          # WICHTIG: KEIN /android-sdk verwenden!
+          # setup-android setzt ANDROID_SDK_ROOT automatisch auf /usr/local/lib/android/sdk
+          # Wir spiegeln ANDROID_HOME darauf, damit p4a/Buildozer es finden.
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
 
-      - name: Accept licenses & pin API/Build-Tools
+      - name: Accept licenses & pin API/Build-Tools (34.0.0)
         shell: bash
         run: |
-          mkdir -p "$ANDROID_SDK_ROOT"
-          yes | sdkmanager --licenses
-          sdkmanager "platforms;android-34" "build-tools;34.0.0"
-          # Eventuelle 36.x Reste aggressiv entfernen (verhindert AIDL-Fehler)
+          # Pfad-Absicherung
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -la "$ANDROID_SDK_ROOT" || true
+
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
+
+          # Eventuelle 36.x Reste aggressiv entfernen
           rm -rf "$HOME/.buildozer/android/platform/android-sdk/build-tools/36."* || true
           rm -rf "$ANDROID_SDK_ROOT/build-tools/36."* || true
 
@@ -90,11 +102,10 @@ jobs:
         shell: bash
         run: |
           source .venv/bin/activate
-          echo "== sdkmanager --list (short) =="
-          sdkmanager --list | sed -n '1,120p' || true
-
           set -o pipefail
-          # ausführliches Buildozer-Log, wir behalten es als Artefakt
+          # explizit beide Variablen setzen, damit p4a/Buildozer sicher den SDK findet
+          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT}"
+          export ANDROID_HOME="${ANDROID_SDK_ROOT}"
           buildozer -v android debug 2>&1 | tee buildozer.log
 
       - name: Show produced files (diagnostics)
@@ -105,7 +116,6 @@ jobs:
           echo "== search for APK/AAB under .buildozer =="
           find .buildozer -type f \( -name "*.apk" -o -name "*.aab" \) -printf "%p\n" || true
 
-      # Artefakte IMMER hochladen: Logs + alle möglichen Output-Pfade
       - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -117,7 +127,7 @@ jobs:
             .buildozer/android/platform/*/gradle-*.log
           if-no-files-found: warn
 
-      - name: Upload APK/AAB (best-effort, mehrere Pfade)
+      - name: Upload APK/AAB (best-effort)
         if: always()
         uses: actions/upload-artifact@v4
         with:
