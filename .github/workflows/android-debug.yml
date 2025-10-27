@@ -18,6 +18,7 @@ concurrency:
 jobs:
   android-debug:
     runs-on: ubuntu-24.04
+
     env:
       GRADLE_OPTS: -Xmx4g -Dorg.gradle.daemon=false
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
@@ -28,12 +29,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: REACHED: after checkout — show tree
-        run: |
-          pwd && ls -la
-          test -f buildozer.spec && echo "FOUND buildozer.spec" || (echo "buildozer.spec MISSING" && exit 1)
-
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -54,7 +50,6 @@ jobs:
             libncurses5-dev libncursesw5-dev libreadline-dev libgdbm-dev liblzma-dev \
             autoconf automake libtool pkg-config cmake curl
 
-
       - name: Restore caches
         uses: actions/cache@v4
         with:
@@ -71,68 +66,70 @@ jobs:
         run: |
           python -m venv .venv
           source .venv/bin/activate
-          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install --upgrade pip
           pip install "cython>=3.0" buildozer
 
-      # Minimal-SDK über Action (installiert platform-tools; setzt /usr/local/lib/android/sdk)
+      # Installiert SDK in /usr/local/lib/android/sdk (beschreibbar) und setzt ANDROID_* Variablen
       - name: Install Android SDK skeleton
         uses: android-actions/setup-android@v3
         with:
           packages: |
             platform-tools
 
-      - name: REACHED: verify sdkmanager & pin API/Build-Tools
+      # Robust: sdkmanager finden/ggf. cmdline-tools nachinstallieren, Lizenzen akzeptieren, API/Build-Tools 34 pinnen.
+      - name: Prepare Android SDK (licenses + API/BT pins)
         shell: bash
         env:
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
           ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
         run: |
-          set -euxo pipefail
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
-          echo "JAVA_HOME=${JAVA_HOME}"
+          set -euo pipefail
 
-          # sdkmanager pfad sicherstellen oder cmdline-tools nachinstallieren
-          SDKROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
-          mkdir -p "${SDKROOT}/cmdline-tools" "${SDKROOT}/platforms" "${SDKROOT}/build-tools"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
+          echo "ANDROID_HOME=${ANDROID_HOME}"
+          mkdir -p "${ANDROID_SDK_ROOT}"
 
-          if [ ! -x "${SDKROOT}/cmdline-tools/latest/bin/sdkmanager" ]; then
-            echo "Installing cmdline-tools latest…"
-            curl -L -o /tmp/cmdtools.zip "https://dl.google.com/android/repository/commandlinetools-linux-12266719_latest.zip"
-            unzip -q /tmp/cmdtools.zip -d "${SDKROOT}/cmdline-tools"
-            mv "${SDKROOT}/cmdline-tools/cmdline-tools" "${SDKROOT}/cmdline-tools/latest"
-            chmod +x "${SDKROOT}/cmdline-tools/latest/bin/"*
+          # 1) sdkmanager ermitteln oder cmdline-tools 'latest' nachinstallieren
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "${SDKMANAGER}" ]; then
+            if [ -x "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" ]; then
+              SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+            else
+              echo "Installing cmdline-tools (latest)…"
+              mkdir -p "${ANDROID_SDK_ROOT}/cmdline-tools"
+              curl -L -o /tmp/cmdtools.zip "https://dl.google.com/android/repository/commandlinetools-linux-12266719_latest.zip"
+              unzip -q /tmp/cmdtools.zip -d "${ANDROID_SDK_ROOT}/cmdline-tools"
+              # entpackt als 'cmdline-tools'; nach 'latest' verschieben (von Google so empfohlen)
+              mv "${ANDROID_SDK_ROOT}/cmdline-tools/cmdline-tools" "${ANDROID_SDK_ROOT}/cmdline-tools/latest"
+              SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+              chmod +x "${SDKMANAGER}"
+            fi
           fi
-          export PATH="${SDKROOT}/cmdline-tools/latest/bin:${SDKROOT}/platform-tools:${PATH}"
+          echo "Using sdkmanager at: ${SDKMANAGER}"
 
-          which sdkmanager
-          sdkmanager --version || true
+          yes | "${SDKMANAGER}" --licenses
 
-          yes | sdkmanager --licenses
+          "${SDKMANAGER}" --install "platforms;android-34" "build-tools;34.0.0" "platform-tools"
 
-          # exakt pinnen
-          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+          # 2) Falls 36.x Build-Tools irgendwie reingekommen sind → entfernen
+          rm -rf "${ANDROID_SDK_ROOT}/build-tools/36."* || true
+          rm -rf "${HOME}/.buildozer/android/platform/android-sdk/build-tools/36."* || true
 
-          # Unerwünschte 36.x Aufräumen (falls Action was nachzieht)
-          rm -rf "${SDKROOT}/build-tools/36."* || true
+          echo "Installed build-tools:"
+          ls -1 "${ANDROID_SDK_ROOT}/build-tools" || true
+          echo "Installed platforms:"
+          ls -1 "${ANDROID_SDK_ROOT}/platforms" || true
 
-          echo "== INSTALLED BUILD-TOOLS =="
-          ls -1 "${SDKROOT}/build-tools" || true
-          echo "== INSTALLED PLATFORMS =="
-          ls -1 "${SDKROOT}/platforms" || true
-
-      - name: REACHED: start buildozer
+      - name: Build debug APK
         shell: bash
         env:
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
           ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
         run: |
-          set -o pipefail
           source .venv/bin/activate
-          echo "Buildozer version:"; buildozer --version || true
-          # Log-Datei VORAB anlegen, damit sie im Fehlerfall existiert
-          : > buildozer.log
-          # Verbose Build
-          buildozer -v android debug 2>&1 | tee -a buildozer.log
+          set -o pipefail
+          # Buildozer findet das SDK über ANDROID_SDK_ROOT/ANDROID_HOME
+          buildozer -v android debug 2>&1 | tee buildozer.log
 
       - name: Diagnostics (list outputs)
         if: always()
@@ -140,9 +137,7 @@ jobs:
           echo "== tree bin (if exists) =="
           (ls -la bin && find bin -maxdepth 2 -type f) || echo "no bin dir"
           echo "== search for APK/AAB under .buildozer =="
-          find .buildozer -type f \( -name "*.apk" -o -name "*.aab" -o -name "*.log" \) -printf "%p\n" || true
-          echo "== tail buildozer.log =="
-          (tail -n 200 buildozer.log) || true
+          find .buildozer -type f \( -name "*.apk" -o -name "*.aab" \) -printf "%p\n" || true
 
       - name: Upload build logs
         if: always()
@@ -155,7 +150,7 @@ jobs:
             .buildozer/android/platform/*/gradle-*.log
           if-no-files-found: warn
 
-      - name: Upload APK/AAB
+      - name: Upload APK/AAB (best-effort)
         if: always()
         uses: actions/upload-artifact@v4
         with:
