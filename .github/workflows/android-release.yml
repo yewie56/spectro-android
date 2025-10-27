@@ -1,0 +1,97 @@
+name: Android APK/AAB (Buildozer Release)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_bundle:
+        description: 'Build Android App Bundle (AAB) instead of APK (requires android.bundle=True in buildozer.spec)'
+        default: 'false'
+        required: false
+      version_tag:
+        description: 'Optional version tag (used for artifact naming)'
+        default: ''
+        required: false
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential git zip unzip \
+            openjdk-17-jdk python3-venv python3-pip \
+            libffi-dev libssl-dev libbz2-dev libsqlite3-dev zlib1g-dev \
+            libncurses5-dev libncursesw5-dev libreadline-dev libgdbm-dev liblzma-dev \
+            autoconf automake libtool pkg-config cmake
+
+      - name: Cache Buildozer/Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            .buildozer
+            ~/.buildozer
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-buildozer-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            ${{ runner.os }}-buildozer-
+
+      - name: Create venv and install Buildozer
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip cython buildozer
+
+      - name: Decode signing keystore
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASEIX" >/dev/null 2>&1 || true
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > keystore.jks
+          ls -l keystore.jks
+
+      - name: Inject signing settings into buildozer.spec
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' && secrets.ANDROID_KEYSTORE_PASSWORD != '' && secrets.ANDROID_KEY_ALIAS != '' && secrets.ANDROID_KEY_ALIAS_PASSWORD != '' }}
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_ALIAS_PASSWORD: ${{ secrets.ANDROID_KEY_ALIAS_PASSWORD }}
+        run: |
+          # Append signing config to the [app] section if not already present
+          awk 'BEGIN{inapp=0} /^\[app\]/{inapp=1} inapp && /^android\.release_keystore/ {found=1} {print} END{if(!found){print "android.release_keystore = keystore.jks\nandroid.release_keystore_pass = " ENVIRON["ANDROID_KEYSTORE_PASSWORD"] "\nandroid.release_keyalias = " ENVIRON["ANDROID_KEY_ALIAS"] "\nandroid.release_keyalias_pass = " ENVIRON["ANDROID_KEY_ALIAS_PASSWORD"]}}' buildozer.spec > buildozer.spec.tmp
+          mv buildozer.spec.tmp buildozer.spec
+          echo "=== buildozer.spec signing tail ==="
+          tail -n 20 buildozer.spec
+
+      - name: Build release (APK or AAB)
+        env:
+          BUILD_BUNDLE: ${{ github.event.inputs.build_bundle }}
+        run: |
+          source .venv/bin/activate
+          if [ "$BUILD_BUNDLE" = "true" ]; then
+            # Requires: android.bundle = True in buildozer.spec
+            buildozer android release
+          else
+            buildozer android release
+          fi
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.event.inputs.version_tag || github.sha }}
+          path: |
+            bin/*.apk
+            bin/*.aab
+          if-no-files-found: warn
